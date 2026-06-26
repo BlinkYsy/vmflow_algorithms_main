@@ -1,0 +1,35 @@
+# Visual Studio local state
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Build outputs
+_Debug/
+_Release/
+outputs/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+bin/
+obj/
+
+# C/C++ build artifacts
+*.ipch
+*.pch
+*.obj
+*.ilk
+*.pdb
+*.exp
+*.lib
+*.dll.recipe
+*.log
+*.tlog
+*.lastbuildstate
+
+# OS/editor noise
+Thumbs.db
+Desktop.ini
+.DS_Store
