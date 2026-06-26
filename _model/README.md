@@ -1,9 +1,9 @@
-# Model Files
+# 模型文件
 
-Model weight files and OCR dictionary files are not stored in this source repository.
+模型权重文件和OCR字典文件未存储在此源代码仓库中。
 
-Download them from the GitHub Release assets:
+从 GitHub 发布的资产中下载它们：
 
-- `model.zip` contains model weight files and OCR dictionary files.
+- `model.zip` 包含模型权重文件和OCR字典文件。
 
-After downloading, extract `model.zip` into this `_model` directory.
+下载后，将 `model.zip` 解压到此 `_model` 目录中。
