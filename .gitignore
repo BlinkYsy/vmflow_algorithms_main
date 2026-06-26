@@ -33,6 +33,7 @@ obj/
 _model/**
 !_model/
 !_model/README.md
+!_model/README_en.md
 
 # OS/editor noise
 Thumbs.db
