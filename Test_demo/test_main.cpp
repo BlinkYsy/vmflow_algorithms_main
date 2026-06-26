@@ -648,7 +648,7 @@ namespace test_AI_detect {
         }
 
         // 读取用于检测的测试图片。
-        cv::Mat inputImage = cv::imread("../_Testimage/output_20260317-145938.345.jpg");
+        cv::Mat inputImage = cv::imread("../_testimage/output_20260317-145938.345.jpg");
         if (inputImage.empty()) {
             std::cerr << "Error: Could not load detect test image: " << std::endl;
             delete[] xmlOut;
@@ -946,7 +946,7 @@ namespace test_AI_obb {
         handleInitResult(ret, xmlOut);
 
         // 读取测试图像并执行推理。
-        cv::Mat inputImage = cv::imread("../_Testimage/p (109).bmp");
+        cv::Mat inputImage = cv::imread("../_testimage/p (109).bmp");
         if (inputImage.empty()) {
             std::cerr << "Error: Could not load image!" << std::endl;
             delete[] xmlOut;
@@ -1022,7 +1022,7 @@ namespace test_AI_segment {
 
 
         constexpr const char* SEG_MODEL_PATH = "..\\_model\\seg_best.torchscript";
-        constexpr const char* TEST_IMAGE_PATH = "../_Testimage/1896.rf.e718dd26abc98c2645ea37a808039034.jpg";
+        constexpr const char* TEST_IMAGE_PATH = "../_testimage/1896.rf.e718dd26abc98c2645ea37a808039034.jpg";
         constexpr const char* SEG_MASK_PATH = "segment_mask.png";
         constexpr const char* SEG_MASK_OVERLAY_PATH = "segment_mask_overlay.jpg";
         constexpr const char* SEG_RESULT_PATH = "segment_result.jpg";
@@ -1736,7 +1736,7 @@ namespace test_AI_pose {
         }
 
         cv::Mat inputImage = cv::imread(
-            "../_Testimage/p (109).bmp");
+            "../_testimage/p (109).bmp");
         if (inputImage.empty()) {
             std::cerr << "Error: Could not load pose test image!" << std::endl;
             delete[] xmlOut;
@@ -1809,8 +1809,8 @@ namespace test_AI_ocr {
             "..\\_model\\en_PP-OCRv4_rec_infer.onnx";
         constexpr const char* PRIMARY_DICT_PATH =
             "..\\_model\\en_dict.txt";
-        constexpr const char* OCR_TEST_IMAGE_PATH = "../_Testimage/456.png";
-            //"../_Testimage/11_2.png";
+        constexpr const char* OCR_TEST_IMAGE_PATH = "../_testimage/456.png";
+            //"../_testimage/11_2.png";
 
         // 解析 OCR 返回 XML 里的 recRegion 字段，恢复文本区域框。
         std::vector<cv::RotatedRect> parseRenderRectBox(const std::string& value) {
