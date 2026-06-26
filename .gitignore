@@ -29,6 +29,11 @@ obj/
 *.tlog
 *.lastbuildstate
 
+# Model artifacts are distributed via GitHub Release assets.
+_model/**
+!_model/
+!_model/README.md
+
 # OS/editor noise
 Thumbs.db
 Desktop.ini
