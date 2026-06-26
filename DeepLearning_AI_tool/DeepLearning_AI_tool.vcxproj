@@ -101,8 +101,8 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>D:\3rdParty\opencv\opencv-4.4.0\build\include;D:\3rdParty\libtorch\include;D:\3rdParty\libtorch\include\torch\csrc\api\include;D:\3rdParty\onnxruntime\include;D:\3rdParty\libtorch_cpu\libtorch\include;$(VC_IncludePath);$(WindowsSDK_IncludePath)</IncludePath>
-    <LibraryPath>D:\3rdParty\opencv\opencv-4.4.0\build\x64\vc16\lib;D:\3rdParty\libtorch\lib;D:\3rdParty\onnxruntime\lib;D:\3rdParty\libtorch_cpu\libtorch\lib;$(VC_LibraryPath_x64);$(WindowsSDK_LibraryPath_x64)</LibraryPath>
+    <IncludePath>D:\3rdParty\opencv\opencv-4.4.0\build\include;D:\3rdParty\libtorch\include;D:\3rdParty\libtorch\include\torch\csrc\api\include;D:\3rdParty\onnxruntime_gpu\include;D:\3rdParty\libtorch_cpu\libtorch\include;$(VC_IncludePath);$(WindowsSDK_IncludePath)</IncludePath>
+    <LibraryPath>D:\3rdParty\opencv\opencv-4.4.0\build\x64\vc16\lib;D:\3rdParty\libtorch\lib;D:\3rdParty\onnxruntime_gpu\lib;D:\3rdParty\libtorch_cpu\libtorch\lib;$(VC_LibraryPath_x64);$(WindowsSDK_LibraryPath_x64)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <IncludePath>D:\3rdParty\opencv\opencv-4.4.0\build\include;D:\3rdParty\libtorch\libtorch-2.11.0\include;D:\3rdParty\libtorch\libtorch-2.11.0\include\torch\csrc\api\include;D:\3rdParty\onnxruntime_gpu\include;D:\3rdParty\libtorch_cpu\libtorch-2.11.0\include;$(VC_IncludePath);$(WindowsSDK_IncludePath)</IncludePath>
@@ -152,7 +152,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>
       </AdditionalLibraryDirectories>
-      <AdditionalDependencies>opencv_world440d.lib;torch.lib;torch_cpu.lib;c10.lib;onnxruntime.lib;onnxruntime_providers_shared.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>opencv_world440d.lib;torch.lib;torch_cpu.lib;c10.lib;onnxruntime.lib;onnxruntime_providers_shared.lib;onnxruntime_providers_cuda.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <DelayLoadDLLs>onnxruntime.dll</DelayLoadDLLs>
     </Link>
   </ItemDefinitionGroup>

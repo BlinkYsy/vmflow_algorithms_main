@@ -83,8 +83,8 @@
     <LibraryPath>..\_Debug;..\DeepLearning_AI_tool\x64\Debug;D:\3rdParty\opencv\opencv-4.4.0\build\x64\vc16\lib;D:\3rdParty\libtorch\lib;$(VC_LibraryPath_x64);$(WindowsSDK_LibraryPath_x64)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <IncludePath>..\DeepLearning_OCR;..\DeepLearning_AI_tool;D:\3rdParty\opencv\opencv-4.4.0\build\include;D:\3rdParty\libtorch\libtorch-2.11.0\include;D:\3rdParty\libtorch\libtorch-2.11.0\include\torch\csrc\api\include;D:\3rdParty\libtorch_cpu\libtorch-2.11.0\include;$(VC_IncludePath);$(WindowsSDK_IncludePath);$(IncludePath)</IncludePath>
-    <LibraryPath>..\_Release;D:\3rdParty\opencv\opencv-4.4.0\build\x64\vc16\lib;D:\3rdParty\libtorch\libtorch-2.11.0\lib;D:\3rdParty\libtorch_cpu\libtorch-2.11.0\lib;$(VC_LibraryPath_x64);$(WindowsSDK_LibraryPath_x64)</LibraryPath>
+    <IncludePath>..\DeepLearning_OCR;..\DeepLearning_AI_tool;D:\3rdParty\opencv\opencv-4.4.0\build\include;D:\3rdParty\libtorch\libtorch-2.11.0\include;D:\3rdParty\libtorch\libtorch-2.11.0\include\torch\csrc\api\include;$(VC_IncludePath);$(WindowsSDK_IncludePath);$(IncludePath)</IncludePath>
+    <LibraryPath>..\_Release;D:\3rdParty\opencv\opencv-4.4.0\build\x64\vc16\lib;D:\3rdParty\libtorch\libtorch-2.11.0\lib;$(VC_LibraryPath_x64);$(WindowsSDK_LibraryPath_x64)</LibraryPath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>

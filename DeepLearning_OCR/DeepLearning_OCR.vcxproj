@@ -85,7 +85,7 @@
     <TargetExt>.dll</TargetExt>
     <LinkIncremental>false</LinkIncremental>
     <IncludePath>D:\3rdParty\opencv\opencv-4.4.0\build\include;D:\3rdParty\libtorch\libtorch-2.11.0\include;D:\3rdParty\libtorch\libtorch-2.11.0\include\torch\csrc\api\include;D:\3rdParty\onnxruntime_gpu\include;D:\3rdParty\libtorch_cpu\libtorch-2.11.0\include;$(VC_IncludePath);$(WindowsSDK_IncludePath)</IncludePath>
-    <LibraryPath>D:\3rdParty\opencv\opencv-4.4.0\build\x64\vc16\lib;D:\3rdParty\libtorch\libtorch-2.11.0\lib;D:\3rdParty\onnxruntime_gpu\lib;D:\3rdParty\libtorch_cpu\libtorch-2.11.0\lib;$(VC_LibraryPath_x64);$(WindowsSDK_LibraryPath_x64)</LibraryPath>
+    <LibraryPath>D:\3rdParty\opencv\opencv-4.4.0\build\x64\vc16\lib;D:\3rdParty\libtorch\libtorch-2.11.0\lib;D:\3rdParty\onnxruntime_gpu\lib;$(VC_LibraryPath_x64);$(WindowsSDK_LibraryPath_x64)</LibraryPath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>

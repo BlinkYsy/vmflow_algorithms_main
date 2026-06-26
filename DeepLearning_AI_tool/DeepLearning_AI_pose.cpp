@@ -725,6 +725,8 @@ int DeepLearning_AI_pose::loadOnnxModule()
 
 		try
 		{
+			//告诉 ONNX Runtime 这个模型会话优先使用 NVIDIA GPU/CUDA 来跑推理
+			//能用 GPU 的算子放到 GPU 上跑，不能用的算子可能回退到 CPU
 			session_options.AppendExecutionProvider_CUDA(cuda_options);
 			m_ortSession = std::make_unique<Ort::Session>(*m_ortEnv, model_path.c_str(), session_options);
 			m_ortUsingCuda = true;
