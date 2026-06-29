@@ -6,7 +6,7 @@
 
 `vmflow_algorithms_main` 是一个 Windows C++/MSVC 视觉算法工程集合，根解决方案为 `vmflow_algorithms_main.sln`。项目面向 DLL 形式的算法集成，使用 C 风格导出接口和 XML 参数传递，主要包含三类能力：
 
-- `DeepLearning_AI_tool`：AI 推理模块，支持目标检测、实例分割、OBB 旋转框检测、姿态识别。
+- `DeepLearning_AI_tool`：AI 推理模块，支持目标检测、语义分割、OBB 定向检测、姿态关键点检测Pose。
 - `DeepLearning_OCR`：OCR 识别模块，基于 ONNX Runtime 加载 OCR 模型。
 - `ColorProcess`：传统图像颜色处理模块，支持颜色抽取和颜色转换。
 
@@ -23,7 +23,8 @@
 ├── Test_demo/                        测试程序工程，演示 DLL 调用流程
 ├── _common_files/                    公共工具、XML 解析、日志、几何/图像辅助函数
 ├── _model/                           测试和部署用模型文件、字典文件
-├── docs/                             运行时 DLL、历史计划文档等辅助文件
+├── _testimage/                       测试图片示例
+├── docs/                             运行时依赖的 DLL、VMFlow接口文档说明等其他辅助文件
 ├── .gitattributes                    Git LFS 二进制文件跟踪规则
 └── .gitignore                        VS 缓存、编译产物、本机用户配置忽略规则
 ```
