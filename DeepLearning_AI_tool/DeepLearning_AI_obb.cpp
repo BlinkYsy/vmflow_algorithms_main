@@ -10,7 +10,6 @@
 #include <algorithm>
 #include <filesystem>
 #include <cctype>
-#include <cmath>
 #include <limits>
 
 // 全局模型对象映射表：moduleID → DeepLearning_AI_obb 实例指针
@@ -38,102 +37,7 @@ namespace
 			});
 	}
 
-	bool tryParseTensorSizeMismatch(const std::string& message, int& tensorSizeA, int& tensorSizeB)
-	{
-		const std::string prefixA = "The size of tensor a (";
-		const std::string middle = ") must match the size of tensor b (";
-		const size_t startA = message.find(prefixA);
-		if (startA == std::string::npos)
-			return false;
 
-		const size_t valueAStart = startA + prefixA.size();
-		const size_t middlePos = message.find(middle, valueAStart);
-		if (middlePos == std::string::npos)
-			return false;
-
-		const size_t valueBStart = middlePos + middle.size();
-		const size_t valueBEnd = message.find(')', valueBStart);
-		if (valueBEnd == std::string::npos)
-			return false;
-
-		try
-		{
-			tensorSizeA = std::stoi(message.substr(valueAStart, middlePos - valueAStart));
-			tensorSizeB = std::stoi(message.substr(valueBStart, valueBEnd - valueBStart));
-			return tensorSizeA > 0 && tensorSizeB > 0;
-		}
-		catch (...)
-		{
-			return false;
-		}
-	}
-
-	int estimateYoloGridCount(int inputSize)
-	{
-		if (inputSize <= 0)
-			return 0;
-
-		const int stride8 = inputSize / 8;
-		const int stride16 = inputSize / 16;
-		const int stride32 = inputSize / 32;
-		return stride8 * stride8 + stride16 * stride16 + stride32 * stride32;
-	}
-
-	int suggestInputSizeFromTensorMismatch(int currentInputSize, int tensorSizeA, int tensorSizeB)
-	{
-		const int currentGridCount = estimateYoloGridCount(currentInputSize);
-		if (currentGridCount <= 0)
-			return 0;
-
-		double scale = 0.0;
-		if (tensorSizeA == currentGridCount)
-		{
-			scale = std::sqrt(static_cast<double>(tensorSizeB) / static_cast<double>(tensorSizeA));
-		}
-		else if (tensorSizeB == currentGridCount)
-		{
-			scale = std::sqrt(static_cast<double>(tensorSizeA) / static_cast<double>(tensorSizeB));
-		}
-		else
-		{
-			const int larger = std::max(tensorSizeA, tensorSizeB);
-			const int smaller = std::min(tensorSizeA, tensorSizeB);
-			scale = std::sqrt(static_cast<double>(larger) / static_cast<double>(smaller));
-		}
-
-		if (!(scale > 0.0) || !std::isfinite(scale))
-			return 0;
-
-		const double suggested = static_cast<double>(currentInputSize) * scale;
-		const int rounded = static_cast<int>(std::lround(suggested));
-		if (rounded <= 0)
-			return 0;
-
-		const int roundedGridCount = estimateYoloGridCount(rounded);
-		if (roundedGridCount != tensorSizeA && roundedGridCount != tensorSizeB)
-			return 0;
-
-		return rounded;
-	}
-
-	std::string buildInputSizeMismatchHint(const std::string& message, int currentInputSize)
-	{
-		int tensorSizeA = 0;
-		int tensorSizeB = 0;
-		if (!tryParseTensorSizeMismatch(message, tensorSizeA, tensorSizeB))
-			return std::string();
-
-		const int suggestedInputSize = suggestInputSizeFromTensorMismatch(currentInputSize, tensorSizeA, tensorSizeB);
-		if (suggestedInputSize <= 0 || suggestedInputSize == currentInputSize)
-			return std::string();
-
-		std::string hint = "Possible inputSize mismatch: current inputSize=";
-		hint.append(std::to_string(currentInputSize));
-		hint.append(", but this TorchScript OBB model appears to expect inputSize=");
-		hint.append(std::to_string(suggestedInputSize));
-		hint.append(".");
-		return hint;
-	}
 }
 
 void DeepLearning_AI_obb::configureAiLoggingForRequest(const char* xmlIn, const std::string& apiName)
@@ -610,18 +514,6 @@ namespace
 		return static_cast<int>(inputHeight);
 	}
 
-	std::string buildOnnxInputSizeHint(int currentInputSize, int expectedInputSize)
-	{
-		if (currentInputSize <= 0 || expectedInputSize <= 0 || currentInputSize == expectedInputSize)
-			return std::string();
-
-		std::string hint = "ONNX model expects inputSize = ";
-		hint.append(std::to_string(expectedInputSize));
-		hint.append(", but current inputSize = ");
-		hint.append(std::to_string(currentInputSize));
-		hint.append(". Please update the XML parameter <inputSize> to match the model export size.");
-		return hint;
-	}
 }
 
 // 通过扩展名判断是否为 ONNX 模型文件
@@ -742,7 +634,7 @@ int DeepLearning_AI_obb::loadOnnxModule()
 	const int fixedInputSize = getFixedSquareOnnxInputSize(*m_ortSession);
 	if (fixedInputSize > 0 && m_inputSize > 0 && fixedInputSize != m_inputSize)
 	{
-		throw std::runtime_error(buildOnnxInputSizeHint(m_inputSize, fixedInputSize));
+		throw std::runtime_error("XML parameter <inputSize> does not match the loaded ONNX model.");
 	}
 
 	m_modelRuntimeFormat = ModelRuntimeFormat::Onnx;
@@ -1013,8 +905,7 @@ int DeepLearning_AI_obb::loadModule(char* xmlIn, string apiName)
 	}
 	catch (const std::exception& e)
 	{
-		std::string errorMessage = e.what();
-		errorMessage.append(buildInputSizeMismatchHint(errorMessage, m_inputSize));
+		const std::string errorMessage = e.what();
 		std::cerr << "loadModule std Exception: " << errorMessage << std::endl;
 		CString str;
 		str.Format("loadModule std Exception %s", errorMessage.c_str());

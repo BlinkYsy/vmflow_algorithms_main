@@ -72,12 +72,12 @@ OCR 模块对外暴露 `DLE_ocr_*` 系列接口。当前实现主要面向 `.onn
 
 ### 4.3 `ColorProcess`
 
-颜色处理模块提供传统图像算法接口，不依赖深度学习模型。
+颜色处理模块提供传统图像的颜色提取和颜色转换算法接口。
 
 | 文件 | 作用 |
 | --- | --- |
 | `ColorProcess_interface.h/.cpp` | 颜色处理 DLL 导出接口。 |
-| `ColorProcess_color_extract.*` | 颜色抽取逻辑。 |
+| `ColorProcess_color_extract.*` | 颜色提取逻辑。 |
 | `ColorProcess_color_transform.*` | 颜色空间/通道转换逻辑。 |
 
 ### 4.4 `_common_files`

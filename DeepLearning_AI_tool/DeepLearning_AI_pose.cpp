@@ -12,6 +12,7 @@
 #include <cctype>
 #include <cmath>
 #include <limits>
+#include <regex>
 
 // 全局模型对象映射表：moduleID → DeepLearning_AI_pose 实例指针
 // DLL 内所有推理流程通过此表查找已注册的模型对象
@@ -24,152 +25,112 @@ extern std::once_flag g_aiLoggerInitFlag;
 namespace
 {
 	thread_local bool poseAiLoggingEnabled = false;
+}
 
-	void ensurePoseAiLoggerInitialized()
-	{
-		if (!poseAiLoggingEnabled)
-			return;
+void DeepLearning_AI_pose::ensurePoseAiLoggerInitialized()
+{
+	if (!poseAiLoggingEnabled)
+		return;
 
-		std::call_once(g_aiLoggerInitFlag, []()
-			{
-				char logPath[] = "d:\\debug\\log";
-				g_log.initLog(logPath, "DeepLearning_AI_pose.log");
-				g_log.Open(logPath, "DeepLearning_AI_pose.log");
-			});
-	}
-
-	bool tryParseTensorSizeMismatch(const std::string& message, int& tensorSizeA, int& tensorSizeB)
-	{
-		const std::string prefixA = "The size of tensor a (";
-		const std::string middle = ") must match the size of tensor b (";
-		const size_t startA = message.find(prefixA);
-		if (startA == std::string::npos)
-			return false;
-
-		const size_t valueAStart = startA + prefixA.size();
-		const size_t middlePos = message.find(middle, valueAStart);
-		if (middlePos == std::string::npos)
-			return false;
-
-		const size_t valueBStart = middlePos + middle.size();
-		const size_t valueBEnd = message.find(')', valueBStart);
-		if (valueBEnd == std::string::npos)
-			return false;
-
-		try
+	std::call_once(g_aiLoggerInitFlag, []()
 		{
-			tensorSizeA = std::stoi(message.substr(valueAStart, middlePos - valueAStart));
-			tensorSizeB = std::stoi(message.substr(valueBStart, valueBEnd - valueBStart));
-			return tensorSizeA > 0 && tensorSizeB > 0;
-		}
-		catch (...)
-		{
-			return false;
-		}
-	}
+			char logPath[] = "d:\\debug\\log";
+			g_log.initLog(logPath, "DeepLearning_AI_pose.log");
+			g_log.Open(logPath, "DeepLearning_AI_pose.log");
+		});
+}
 
-	int estimateYoloGridCount(int inputSize)
+//从 ONNX 模型输入张量里直接读出模型固定输入尺寸
+int DeepLearning_AI_pose::getFixedSquareOnnxInputSize(const Ort::Session& session)
+{
+	if (session.GetInputCount() == 0)
+		return 0;
+
+	auto inputTypeInfo = session.GetInputTypeInfo(0);
+	auto tensorTypeInfo = inputTypeInfo.GetTensorTypeAndShapeInfo();
+	const std::vector<int64_t> inputShape = tensorTypeInfo.GetShape();
+	if (inputShape.size() < 4)
+		return 0;
+
+	const int64_t inputHeight = inputShape[2];
+	const int64_t inputWidth = inputShape[3];
+	if (inputHeight <= 0 || inputWidth <= 0)
+		return 0;
+	if (inputHeight != inputWidth)
+		return 0;
+	if (inputHeight > static_cast<int64_t>(std::numeric_limits<int>::max()))
+		return 0;
+
+	return static_cast<int>(inputHeight);
+}
+
+// 返回去除首尾空白字符后的字符串副本。
+std::string DeepLearning_AI_pose::trimCopy(const std::string& value)
+{
+	const char* whitespace = " \t\r\n";
+	size_t start = value.find_first_not_of(whitespace);
+	if (start == std::string::npos)
+		return std::string();
+
+	const size_t end = value.find_last_not_of(whitespace);
+	return value.substr(start, end - start + 1);
+}
+
+// 解析 ONNX metadata 中的 kpt_shape 文本，提取 pose 模型的关键点数
+int DeepLearning_AI_pose::parsePoseKptCountFromShapeText(const std::string& shapeText)
+{
+	const std::regex shapePattern(R"(\[\s*(\d+)\s*,\s*(\d+)\s*\])");
+	std::smatch match;
+	if (!std::regex_search(shapeText, match, shapePattern))
+		return 0;
+
+	try
 	{
-		if (inputSize <= 0)
+		const int kptCount = std::stoi(match[1].str());
+		const int kptDim = std::stoi(match[2].str());
+		if (kptCount <= 0 || kptDim < 2)
 			return 0;
-
-		const int stride8 = inputSize / 8;
-		const int stride16 = inputSize / 16;
-		const int stride32 = inputSize / 32;
-		return stride8 * stride8 + stride16 * stride16 + stride32 * stride32;
+		return kptCount;
 	}
-
-	int suggestInputSizeFromTensorMismatch(int currentInputSize, int tensorSizeA, int tensorSizeB)
+	catch (const std::exception& e)
 	{
-		const int currentGridCount = estimateYoloGridCount(currentInputSize);
-		if (currentGridCount <= 0)
-			return 0;
-
-		double scale = 0.0;
-		if (tensorSizeA == currentGridCount)
-		{
-			scale = std::sqrt(static_cast<double>(tensorSizeB) / static_cast<double>(tensorSizeA));
-		}
-		else if (tensorSizeB == currentGridCount)
-		{
-			scale = std::sqrt(static_cast<double>(tensorSizeA) / static_cast<double>(tensorSizeB));
-		}
-		else
-		{
-			const int larger = std::max(tensorSizeA, tensorSizeB);
-			const int smaller = std::min(tensorSizeA, tensorSizeB);
-			scale = std::sqrt(static_cast<double>(larger) / static_cast<double>(smaller));
-		}
-
-		if (!(scale > 0.0) || !std::isfinite(scale))
-			return 0;
-
-		const double suggested = static_cast<double>(currentInputSize) * scale;
-		const int rounded = static_cast<int>(std::lround(suggested));
-		if (rounded <= 0)
-			return 0;
-
-		const int roundedGridCount = estimateYoloGridCount(rounded);
-		if (roundedGridCount != tensorSizeA && roundedGridCount != tensorSizeB)
-			return 0;
-
-		return rounded;
+		std::cerr << e.what() << std::endl;
+		return 0;
 	}
+}
 
-	std::string buildInputSizeMismatchHint(const std::string& message, int currentInputSize)
+// 解析 TorchScript config 中的 kpt_shape 配置，提取 pose 模型的关键点数量
+int DeepLearning_AI_pose::parsePoseKptCountFromConfigText(const std::string& configText)
+{
+	const std::regex kptShapePattern(R"("kpt_shape"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*\])");
+	std::smatch match;
+	if (!std::regex_search(configText, match, kptShapePattern))
+		return 0;
+
+	try
 	{
-		int tensorSizeA = 0;
-		int tensorSizeB = 0;
-		if (!tryParseTensorSizeMismatch(message, tensorSizeA, tensorSizeB))
-			return std::string();
-
-		const int suggestedInputSize = suggestInputSizeFromTensorMismatch(currentInputSize, tensorSizeA, tensorSizeB);
-		if (suggestedInputSize <= 0 || suggestedInputSize == currentInputSize)
-			return std::string();
-
-		std::string hint = " Possible inputSize mismatch: current inputSize=";
-		hint.append(std::to_string(currentInputSize));
-		hint.append(", but this TorchScript pose model appears to expect inputSize=");
-		hint.append(std::to_string(suggestedInputSize));
-		hint.append(".");
-		return hint;
+		const int kptCount = std::stoi(match[1].str());
+		const int kptDim = std::stoi(match[2].str());
+		if (kptCount <= 0 || kptDim < 2)
+			return 0;
+		return kptCount;
 	}
-
-	int getFixedSquareOnnxInputSize(const Ort::Session& session)
+	catch (const std::exception& e)
 	{
-		if (session.GetInputCount() == 0)
-			return 0;
-
-		auto inputTypeInfo = session.GetInputTypeInfo(0);
-		auto tensorTypeInfo = inputTypeInfo.GetTensorTypeAndShapeInfo();
-		const std::vector<int64_t> inputShape = tensorTypeInfo.GetShape();
-		if (inputShape.size() < 4)
-			return 0;
-
-		const int64_t inputHeight = inputShape[2];
-		const int64_t inputWidth = inputShape[3];
-		if (inputHeight <= 0 || inputWidth <= 0)
-			return 0;
-		if (inputHeight != inputWidth)
-			return 0;
-		if (inputHeight > static_cast<int64_t>(std::numeric_limits<int>::max()))
-			return 0;
-
-		return static_cast<int>(inputHeight);
+		std::cerr << e.what() << std::endl;
+		return 0;
 	}
+}
 
-	std::string buildOnnxInputSizeHint(int currentInputSize, int expectedInputSize)
-	{
-		if (currentInputSize <= 0 || expectedInputSize <= 0 || currentInputSize == expectedInputSize)
-			return std::string();
+// 解析 TorchScript config 中的 task 字段，决定后续布局推断是否优先尝试带 angle 的输出格式
+bool DeepLearning_AI_pose::parsePosePreferAngleFromConfigText(const std::string& configText)
+{
+	const std::regex taskPattern(R"task("task"\s*[:=]\s*"([^"]+)")task");
+	std::smatch match;
+	if (!std::regex_search(configText, match, taskPattern))
+		return false;
 
-		std::string hint = "ONNX model expects inputSize=";
-		hint.append(std::to_string(expectedInputSize));
-		hint.append(", but current inputSize=");
-		hint.append(std::to_string(currentInputSize));
-		hint.append(". Please update the XML parameter <inputSize> to match the model export size.");
-		return hint;
-	}
+	return trimCopy(match[1].str()) == "obb";
 }
 
 void DeepLearning_AI_pose::configureAiLoggingForRequest(const char* xmlIn, const std::string& apiName)
@@ -193,273 +154,271 @@ bool DeepLearning_AI_pose::addAiLog(long logTypeCode, const char* content)
 	return g_log.AddLog(logTypeCode, content);
 }
 
-namespace
+bool DeepLearning_AI_pose::isValidKeypoint(const cv::Point2f& pt, const cv::Size& imageSize)
 {
-	std::vector<int> parseCategoryIds(const std::string& value);
-	cv::Scalar getColorForCategory(int category);
-	std::string getCategoryDisplayName(int category);
-	cv::Mat renderPoseImage(
-		const cv::Mat& srcImg,
-		const std::vector<cv::RotatedRect>& rects,
-		const std::vector<int>& categories,
-		const std::vector<cv::Point2f>& keypoints);
+	return std::isfinite(pt.x)
+		&& std::isfinite(pt.y)
+		&& pt.x >= 0.0f
+		&& pt.y >= 0.0f
+		&& pt.x < static_cast<float>(imageSize.width)
+		&& pt.y < static_cast<float>(imageSize.height);
+}
 
-	std::vector<int> parseCategoryIds(const std::string& value)
+bool DeepLearning_AI_pose::isPointNearRotatedRect(const cv::Point2f& pt, const cv::RotatedRect& rect, float margin)
+{
+	const float theta = rect.angle * static_cast<float>(CV_PI / 180.0);
+	const float cosTheta = std::cos(theta);
+	const float sinTheta = std::sin(theta);
+	const float dx = pt.x - rect.center.x;
+	const float dy = pt.y - rect.center.y;
+	const float localX = dx * cosTheta + dy * sinTheta;
+	const float localY = -dx * sinTheta + dy * cosTheta;
+	const float halfW = rect.size.width * 0.5f + margin;
+	const float halfH = rect.size.height * 0.5f + margin;
+	return std::abs(localX) <= halfW && std::abs(localY) <= halfH;
+}
+
+std::vector<int> DeepLearning_AI_pose::parseCategoryIds(const std::string& value)
+{
+	std::vector<int> ids;
+	std::stringstream ss(value);
+	std::string token;
+	while (std::getline(ss, token, ','))
 	{
-		std::vector<int> ids;
-		std::stringstream ss(value);
-		std::string token;
-		while (std::getline(ss, token, ','))
-		{
-			if (token.empty())
-				continue;
-			ids.push_back(std::atoi(token.c_str()));
-		}
-		return ids;
+		if (token.empty())
+			continue;
+		ids.push_back(std::atoi(token.c_str()));
 	}
+	return ids;
+}
 
-	cv::Scalar getColorForCategory(int category)
-	{
-		static const std::vector<cv::Scalar> palette = {
-			cv::Scalar(0, 255, 0),
-			cv::Scalar(0, 0, 255),
-			cv::Scalar(255, 0, 0),
-			cv::Scalar(0, 255, 255),
-			cv::Scalar(255, 255, 0),
-			cv::Scalar(255, 0, 255),
-			cv::Scalar(0, 128, 255),
-			cv::Scalar(128, 0, 255),
-			cv::Scalar(255, 128, 0),
-			cv::Scalar(0, 200, 120)
-		};
+cv::Scalar DeepLearning_AI_pose::getColorForCategory(int category)
+{
+	static const std::vector<cv::Scalar> palette = {
+		cv::Scalar(0, 255, 0),
+		cv::Scalar(0, 0, 255),
+		cv::Scalar(255, 0, 0),
+		cv::Scalar(0, 255, 255),
+		cv::Scalar(255, 255, 0),
+		cv::Scalar(255, 0, 255),
+		cv::Scalar(0, 128, 255),
+		cv::Scalar(128, 0, 255),
+		cv::Scalar(255, 128, 0),
+		cv::Scalar(0, 200, 120)
+	};
 
-		if (category < 0)
-			return cv::Scalar(200, 200, 200);
+	if (category < 0)
+		return cv::Scalar(200, 200, 200);
 
-		return palette[static_cast<size_t>(category) % palette.size()];
-	}
+	return palette[static_cast<size_t>(category) % palette.size()];
+}
 
-	std::string getCategoryDisplayName(int category)
-	{
-		if (category < 0)
-			return "cls_unknown";
-		return "cls:" + std::to_string(category);
-	}
+std::string DeepLearning_AI_pose::getCategoryDisplayName(int category)
+{
+	if (category < 0)
+		return "cls_unknown";
+	return "cls:" + std::to_string(category);
+}
 
-	cv::Mat renderPoseImage(
+cv::Mat DeepLearning_AI_pose::renderPoseImage(
 		const cv::Mat& srcImg,
 		const std::vector<cv::RotatedRect>& rects,
 		const std::vector<int>& categories,
 		const std::vector<cv::Point2f>& keypoints)
+{
+	cv::Mat vis = srcImg.clone();
+	const bool hasCategoryPerBox = categories.size() == rects.size();
+	const int keypointsPerBox = (rects.empty() || keypoints.empty() || keypoints.size() % rects.size() != 0)
+		? 0
+		: static_cast<int>(keypoints.size() / rects.size());
+
+	for (size_t i = 0; i < rects.size(); ++i)
 	{
-		cv::Mat vis = srcImg.clone();
-		const bool hasCategoryPerBox = categories.size() == rects.size();
-		int keypointsPerBox = 0;
-		if (!keypoints.empty() && !rects.empty() && keypoints.size() % rects.size() == 0)
+		const int category = hasCategoryPerBox ? categories[i] : -1;
+		const cv::Scalar color = getColorForCategory(category);
+		cv::Point2f pts[4];
+		rects[i].points(pts);
+
+		std::vector<cv::Point> contour;
+		contour.reserve(4);
+		for (const auto& pt : pts)
 		{
-			keypointsPerBox = static_cast<int>(keypoints.size() / rects.size());
+			contour.emplace_back(cvRound(pt.x), cvRound(pt.y));
 		}
+		cv::polylines(vis, contour, true, color, 2, cv::LINE_AA);
 
-		for (size_t i = 0; i < rects.size(); ++i)
+		const cv::Point2f* anchor = &pts[0];
+		for (int j = 1; j < 4; ++j)
 		{
-			const int category = hasCategoryPerBox ? categories[i] : -1;
-			const cv::Scalar color = getColorForCategory(category);
-			cv::Point2f pts[4];
-			rects[i].points(pts);
-
-			std::vector<cv::Point> contour;
-			contour.reserve(4);
-			for (const auto& pt : pts)
+			if (pts[j].y < anchor->y || (pts[j].y == anchor->y && pts[j].x < anchor->x))
 			{
-				contour.emplace_back(cvRound(pt.x), cvRound(pt.y));
-			}
-			cv::polylines(vis, contour, true, color, 2, cv::LINE_AA);
-
-			const cv::Point2f* anchor = &pts[0];
-			for (int j = 1; j < 4; ++j)
-			{
-				if (pts[j].y < anchor->y || (pts[j].y == anchor->y && pts[j].x < anchor->x))
-				{
-					anchor = &pts[j];
-				}
-			}
-
-			const int textY = (static_cast<int>(anchor->y) - 8 < 20) ? 20 : (static_cast<int>(anchor->y) - 8);
-			cv::putText(
-				vis,
-				getCategoryDisplayName(category),
-				cv::Point(static_cast<int>(anchor->x), textY),
-				cv::FONT_HERSHEY_SIMPLEX,
-				0.7,
-				color,
-				2,
-				cv::LINE_AA);
-
-			if (keypointsPerBox > 0)
-			{
-				const size_t startIndex = i * static_cast<size_t>(keypointsPerBox);
-				const size_t endIndex = std::min(keypoints.size(), startIndex + static_cast<size_t>(keypointsPerBox));
-				cv::Point prevPoint;
-				bool hasPrevPoint = false;
-				for (size_t kpIndex = startIndex; kpIndex < endIndex; ++kpIndex)
-				{
-					const cv::Point center(cvRound(keypoints[kpIndex].x), cvRound(keypoints[kpIndex].y));
-					cv::circle(vis, center, 4, color, -1, cv::LINE_AA);
-					if (hasPrevPoint)
-					{
-						cv::line(vis, prevPoint, center, color, 2, cv::LINE_AA);
-					}
-					prevPoint = center;
-					hasPrevPoint = true;
-				}
+				anchor = &pts[j];
 			}
 		}
 
-		return vis;
+		const int textY = (static_cast<int>(anchor->y) - 8 < 20) ? 20 : (static_cast<int>(anchor->y) - 8);
+		cv::putText(
+			vis,
+			getCategoryDisplayName(category),
+			cv::Point(static_cast<int>(anchor->x), textY),
+			cv::FONT_HERSHEY_SIMPLEX,
+			0.7,
+			color,
+			2,
+			cv::LINE_AA);
+
+		if (keypointsPerBox <= 0)
+			continue;
+
+		const size_t startIndex = i * static_cast<size_t>(keypointsPerBox);
+		const size_t endIndex = std::min(keypoints.size(), startIndex + static_cast<size_t>(keypointsPerBox));
+		for (size_t kpIndex = startIndex; kpIndex < endIndex; ++kpIndex)
+		{
+			const cv::Point2f& kp = keypoints[kpIndex];
+			if (!isValidKeypoint(kp, vis.size()) || !isPointNearRotatedRect(kp, rects[i], 8.0f))
+				continue;
+
+			cv::circle(vis, cv::Point(cvRound(kp.x), cvRound(kp.y)), 4, color, -1, cv::LINE_AA);
+		}
 	}
 
-	renderParam makeRenderParam(const std::vector<cv::RotatedRect>& rects, const std::vector<cv::Point2f>& dots);
-	void beginProcessXml(CMarkup& xml, DeepLearning_AI_pose* deepAI, const std::string& apiName, const char* moduleStatusCh);
-	void finishProcessXml(CMarkup& xml, char** xmlOut);
-	void addScoreCategoryXml(CMarkup& xml, const std::string& score, const std::string& category, bool trimTrailingComma);
-	void addAxisXml(CMarkup& xml, const std::vector<cv::RotatedRect>& rects, bool useRectAngle, const char* shortAxisName, const char* longAxisName);
-	void addRenderXml(CMarkup& xml, renderParam& rendPar, const char* rectCh, bool includeDots);
-	std::string trimTrailingCommaOrDefault(const std::string& value, const char* defaultValue);
+	return vis;
+}
 
 	// 将扩展名统一转成小写，避免大小写路径导致的后端识别误差
-	std::string toLowerCopy(const std::string& value)
+std::string DeepLearning_AI_pose::toLowerCopy(const std::string& value)
+{
+	std::string lower = value;
+	std::transform(lower.begin(), lower.end(), lower.begin(),
+		[](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+	return lower;
+}
+
+// ONNXRuntime 的张量类型先映射到 torch 类型，便于后续统一走 torch::Tensor 后处理链路
+torch::ScalarType DeepLearning_AI_pose::ortTensorElementTypeToTorch(ONNXTensorElementDataType element_type)
+{
+	switch (element_type)
 	{
-		std::string lower = value;
-		std::transform(lower.begin(), lower.end(), lower.begin(),
-			[](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-		return lower;
+	case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+		return torch::kFloat32;
+	case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
+		return torch::kFloat64;
+	case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+		return torch::kInt64;
+	case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+		return torch::kInt32;
+	case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
+		return torch::kUInt8;
+	default:
+		throw std::runtime_error("Unsupported ONNX tensor element type");
+	}
+}
+
+// ONNXRuntime 输出张量默认由 ORT 管理生命周期，这里 clone 一份后续就能安全脱离会话对象使用
+torch::Tensor DeepLearning_AI_pose::ortValueToTensor(Ort::Value& value)
+{
+	auto type_info = value.GetTensorTypeAndShapeInfo();
+	std::vector<int64_t> shape = type_info.GetShape();
+	const auto element_type = type_info.GetElementType();
+	const torch::ScalarType torch_type = ortTensorElementTypeToTorch(element_type);
+
+	if (shape.empty())
+	{
+		shape.push_back(1);
 	}
 
-	// ONNXRuntime 的张量类型先映射到 torch 类型，便于后续统一走 torch::Tensor 后处理链路
-	torch::ScalarType ortTensorElementTypeToTorch(ONNXTensorElementDataType element_type)
+	switch (element_type)
 	{
-		switch (element_type)
-		{
-		case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
-			return torch::kFloat32;
-		case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
-			return torch::kFloat64;
-		case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
-			return torch::kInt64;
-		case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
-			return torch::kInt32;
-		case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
-			return torch::kUInt8;
-		default:
-			throw std::runtime_error("Unsupported ONNX tensor element type");
-		}
+	case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+		return torch::from_blob(value.GetTensorMutableData<float>(), shape, torch_type).clone();
+	case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
+		return torch::from_blob(value.GetTensorMutableData<double>(), shape, torch_type).clone();
+	case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+		return torch::from_blob(value.GetTensorMutableData<int64_t>(), shape, torch_type).clone();
+	case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+		return torch::from_blob(value.GetTensorMutableData<int32_t>(), shape, torch_type).clone();
+	case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
+		return torch::from_blob(value.GetTensorMutableData<uint8_t>(), shape, torch_type).clone();
+	default:
+		throw std::runtime_error("Unsupported ONNX tensor element type");
 	}
+}
 
-	// ONNXRuntime 输出张量默认由 ORT 管理生命周期，这里 clone 一份后续就能安全脱离会话对象使用
-	torch::Tensor ortValueToTensor(Ort::Value& value)
-	{
-		auto type_info = value.GetTensorTypeAndShapeInfo();
-		std::vector<int64_t> shape = type_info.GetShape();
-		const auto element_type = type_info.GetElementType();
-		const torch::ScalarType torch_type = ortTensorElementTypeToTorch(element_type);
+// 从 XML 中读取 moduleID，并在全局实例表里找到对应的模型对象
+DeepLearning_AI_pose* DeepLearning_AI_pose::findDeepAIByModuleXml(char* xmlIn, const std::string& apiName)
+{
+	ResolveXml rXml;
+	int id = rXml.parseXmlInt(xmlIn, "Param", apiName, "moduleID");
+	auto mapIter = g_mapDLE_AI_pose.find(id);
+	if (mapIter == g_mapDLE_AI_pose.end())
+		return nullptr;
 
-		if (shape.empty())
-		{
-			shape.push_back(1);
-		}
+	return mapIter->second;
+}
 
-		switch (element_type)
-		{
-		case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
-			return torch::from_blob(value.GetTensorMutableData<float>(), shape, torch_type).clone();
-		case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
-			return torch::from_blob(value.GetTensorMutableData<double>(), shape, torch_type).clone();
-		case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
-			return torch::from_blob(value.GetTensorMutableData<int64_t>(), shape, torch_type).clone();
-		case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
-			return torch::from_blob(value.GetTensorMutableData<int32_t>(), shape, torch_type).clone();
-		case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
-			return torch::from_blob(value.GetTensorMutableData<uint8_t>(), shape, torch_type).clone();
-		default:
-			throw std::runtime_error("Unsupported ONNX tensor element type");
-		}
-	}
+// 解析处理阶段 XML，并把 rotRectROI 统一折算成普通矩形 ROI，供后续裁剪与回填坐标使用
+void DeepLearning_AI_pose::prepareProcessXmlInput(DeepLearning_AI_pose* deepAI, void* inImg, char* xmlIn, const std::string& apiName)
+{
+	int ret = deepAI->parseProcessXml(inImg, xmlIn, apiName);
+	if (ret)
+		throw "parseProcessXml Error";
 
-	// 从 XML 中读取 moduleID，并在全局实例表里找到对应的模型对象
-	DeepLearning_AI_pose* findDeepAIByModuleXml(char* xmlIn, const std::string& apiName)
-	{
-		ResolveXml rXml;
-		int id = rXml.parseXmlInt(xmlIn, "Param", apiName, "moduleID");
-		auto mapIter = g_mapDLE_AI_pose.find(id);
-		if (mapIter == g_mapDLE_AI_pose.end())
-			return nullptr;
+	deepAI->rotateRect2Rect();
+}
 
-		return mapIter->second;
-	}
+// 调试模式下保存源图与 ROI，方便定位 XML 传入范围是否正确
+void DeepLearning_AI_pose::saveDebugSourceImage(DeepLearning_AI_pose* deepAI)
+{
+	if (!deepAI->m_pDebugProcess)
+		return;
 
-	// 解析处理阶段 XML，并把 rotRectROI 统一折算成普通矩形 ROI，供后续裁剪与回填坐标使用
-	void prepareProcessXmlInput(DeepLearning_AI_pose* deepAI, void* inImg, char* xmlIn, const std::string& apiName)
-	{
-		int ret = deepAI->parseProcessXml(inImg, xmlIn, apiName);
-		if (ret)
-			throw "parseProcessXml Error";
+	cv::Mat buf = deepAI->m_pSrcImg.clone();
+	cv::rectangle(buf, deepAI->m_pRect, cv::Scalar(255, 0, 0), 2, 8);
+	cv::imwrite("d:\\debug\\spring_Src.jpg", buf);
+}
 
-		deepAI->rotateRect2Rect();
-	}
-
-	// 调试模式下保存源图与 ROI，方便定位 XML 传入范围是否正确
-	void saveDebugSourceImage(DeepLearning_AI_pose* deepAI)
-	{
-		if (!deepAI->m_pDebugProcess)
-			return;
-
-		cv::Mat buf = deepAI->m_pSrcImg.clone();
-		cv::rectangle(buf, deepAI->m_pRect, cv::Scalar(255, 0, 0), 2, 8);
-		cv::imwrite("d:\\debug\\spring_Src.jpg", buf);
-	}
-
-	// 调试模式下保存结果图，方便定位 XML 传入范围是否正确
-	void saveDebugResultImage(
+// 调试模式下保存结果图，方便定位 XML 传入范围是否正确
+void DeepLearning_AI_pose::saveDebugResultImage(
 		DeepLearning_AI_pose* deepAI,
 		const std::vector<cv::RotatedRect>& rects,
 		const std::vector<cv::Point2f>& dots)
+{
+	if (!deepAI->m_pDebugResult)
+		return;
+
+	cv::Mat buf = deepAI->m_pSrcImg.clone();
+
+	cv::rectangle(buf, deepAI->m_pRect, cv::Scalar(255, 0, 0), 2, 8);
+
+	for (const auto& rect : rects)
 	{
-		if (!deepAI->m_pDebugResult)
-			return;
-
-		cv::Mat buf = deepAI->m_pSrcImg.clone();
-
-		cv::rectangle(buf, deepAI->m_pRect, cv::Scalar(255, 0, 0), 2, 8);
-
-		for (const auto& rect : rects)
+		cv::Point2f pts[4];
+		rect.points(pts);
+		for (int i = 0; i < 4; ++i)
 		{
-			cv::Point2f pts[4];
-			rect.points(pts);
-			for (int i = 0; i < 4; ++i)
-			{
-				cv::line(buf, pts[i], pts[(i + 1) % 4], cv::Scalar(0, 0, 255), 2, 8);
-			}
+			cv::line(buf, pts[i], pts[(i + 1) % 4], cv::Scalar(0, 0, 255), 2, 8);
 		}
-
-		for (const auto& pt : dots)
-		{
-			cv::circle(buf, pt, 3, cv::Scalar(0, 255, 0), -1, 8);
-		}
-
-		cv::imwrite("d:\\debug\\spring_Result.jpg", buf);
 	}
 
-	// 若调用方传入 rotRectROI，则截取首个 ROI 对应子图；否则直接使用整图
-	cv::Mat cropByPreparedRectRoi(DeepLearning_AI_pose* deepAI, cv::Rect& rectSrc)
+	for (const auto& pt : dots)
 	{
-		// prepareProcessXmlInput 已经通过 rotateRect2Rect() 把首个旋转 ROI 折算到 m_pRect
-		rectSrc = deepAI->m_pRect;
-		return deepAI->m_pSrcImg(rectSrc);
+		cv::circle(buf, pt, 3, cv::Scalar(0, 255, 0), -1, 8);
 	}
 
+	cv::imwrite("d:\\debug\\spring_Result.jpg", buf);
+}
 
-	// 统一生成“检测到目标/缺陷”的结果 XML
-	void writeObjectResultXml(
+// 若调用方传入 rotRectROI，则截取首个 ROI 对应子图；否则直接使用整图
+cv::Mat DeepLearning_AI_pose::cropByPreparedRectRoi(DeepLearning_AI_pose* deepAI, cv::Rect& rectSrc)
+{
+	// prepareProcessXmlInput 已经通过 rotateRect2Rect() 把首个旋转 ROI 折算到 m_pRect
+	rectSrc = deepAI->m_pRect;
+	return deepAI->m_pSrcImg(rectSrc);
+}
+
+
+// 统一生成“检测到目标/缺陷”的结果 XML
+void DeepLearning_AI_pose::writeObjectResultXml(
 		char** xmlOut,
 		DeepLearning_AI_pose* deepAI,
 		const std::string& apiName,
@@ -474,21 +433,21 @@ namespace
 		const char* longAxisName,
 		const char* moduleStatusCh,
 		const char* rectCh)
-	{
-		CMarkup xml;
-		renderParam rendPar = makeRenderParam(rects, dots);
+{
+	CMarkup xml;
+	renderParam rendPar = makeRenderParam(rects, dots);
 
-		beginProcessXml(xml, deepAI, apiName, moduleStatusCh);
-		xml.AddElem("defectStatus", defectStatus);
-		xml.SetAttrib("CH", "结果：存在缺陷");
-		addRenderXml(xml, rendPar, rectCh, true);
-		addScoreCategoryXml(xml, score, category, trimScoreCategory);
-		addAxisXml(xml, rects, useRectAngle, shortAxisName, longAxisName);
-		finishProcessXml(xml, xmlOut);
-	}
+	beginProcessXml(xml, deepAI, apiName, moduleStatusCh);
+	xml.AddElem("defectStatus", defectStatus);
+	xml.SetAttrib("CH", "结果：存在缺陷");
+	addRenderXml(xml, rendPar, rectCh, true);
+	addScoreCategoryXml(xml, score, category, trimScoreCategory);
+	addAxisXml(xml, rects, useRectAngle, shortAxisName, longAxisName);
+	finishProcessXml(xml, xmlOut);
+}
 
-	// 统一生成“未检测到目标/结果正常”的 XML
-	void writeNormalResultXml(
+// 统一生成“未检测到目标/结果正常”的 XML
+void DeepLearning_AI_pose::writeNormalResultXml(
 		char** xmlOut,
 		DeepLearning_AI_pose* deepAI,
 		const std::string& apiName,
@@ -497,164 +456,163 @@ namespace
 		bool includeAxis,
 		const char* shortAxisName,
 		const char* longAxisName)
+{
+	CMarkup xml;
+	beginProcessXml(xml, deepAI, apiName, "模块状态");
+	xml.AddElem("defectStatus", defectStatus);
+	xml.SetAttrib("CH", "结果：正常");
+
+	if (includeRender)
 	{
-		CMarkup xml;
-		beginProcessXml(xml, deepAI, apiName, "模块状态");
-		xml.AddElem("defectStatus", defectStatus);
-		xml.SetAttrib("CH", "结果：正常");
-
-		if (includeRender)
-		{
-			xml.AddElem("renderRectBox", "");
-			xml.SetAttrib("CH", "渲染矩形");
-			xml.AddElem("renderDot", "");
-			xml.SetAttrib("CH", "渲染点集");
-		}
-
-		xml.AddElem("score", 0);
-		xml.SetAttrib("CH", "置信度分数");
-		xml.AddElem("category", -100);
-		xml.SetAttrib("CH", "类别");
-
-		if (includeAxis)
-		{
-			xml.AddElem(shortAxisName, "");
-			xml.SetAttrib("CH", "短轴");
-			xml.AddElem(longAxisName, "");
-			xml.SetAttrib("CH", "长轴");
-			xml.AddElem("angle", "");
-			xml.SetAttrib("CH", "角度");
-		}
-
-		finishProcessXml(xml, xmlOut);
+		xml.AddElem("renderRectBox", "");
+		xml.SetAttrib("CH", "渲染矩形");
+		xml.AddElem("renderDot", "");
+		xml.SetAttrib("CH", "渲染点集");
 	}
 
-	// 输出统一的整条调用耗时，便于从 DLL 日志观察端到端性能
-	void logWholeProcessCost(DWORD startTick)
+	xml.AddElem("score", 0);
+	xml.SetAttrib("CH", "置信度分数");
+	xml.AddElem("category", -100);
+	xml.SetAttrib("CH", "类别");
+
+	if (includeAxis)
 	{
-		DWORD endTick = GetTickCount64();
-		string str = "The whole process Running Time is :";
-		str.append(to_string(endTick - startTick));
-		DeepLearning_AI_pose::addAiLog(LOG_MESSAGE, str.c_str());
+		xml.AddElem(shortAxisName, "");
+		xml.SetAttrib("CH", "短轴");
+		xml.AddElem(longAxisName, "");
+		xml.SetAttrib("CH", "长轴");
+		xml.AddElem("angle", "");
+		xml.SetAttrib("CH", "角度");
 	}
 
-	// 将矩形框与点集打包成 renderParam，统一供 XML 输出函数复用
-	renderParam makeRenderParam(const std::vector<cv::RotatedRect>& rects, const std::vector<cv::Point2f>& dots)
-	{
-		renderParam rendPar;
-		rendPar.m_renderRectBox = rects;
-		rendPar.m_renderDot = dots;
-		return rendPar;
-	}
+	finishProcessXml(xml, xmlOut);
+}
 
-	// 创建 XML 根结构并写入公共的模块状态字段
-	void beginProcessXml(CMarkup& xml, DeepLearning_AI_pose* deepAI, const std::string& apiName, const char* moduleStatusCh)
-	{
-		xml.SetDoc("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n");
-		xml.AddElem("Param");
-		xml.IntoElem();
-		xml.AddElem(apiName.c_str());
-		xml.IntoElem();
+// 输出统一的整条调用耗时，便于从 DLL 日志观察端到端性能
+void DeepLearning_AI_pose::logWholeProcessCost(DWORD startTick)
+{
+	DWORD endTick = GetTickCount64();
+	string str = "The whole process Running Time is :";
+	str.append(to_string(endTick - startTick));
+	DeepLearning_AI_pose::addAiLog(LOG_MESSAGE, str.c_str());
+}
 
-		CString statusNumStr;
-		int modStatus = deepAI->m_pModStatus ? 1 : 0;
-		statusNumStr.Format("%d", modStatus);
-		xml.AddElem("moduleStatus", statusNumStr.GetBuffer());
-		xml.SetAttrib("CH", moduleStatusCh);
-	}
+// 将矩形框与点集打包成 renderParam，统一供 XML 输出函数复用
+renderParam DeepLearning_AI_pose::makeRenderParam(const std::vector<cv::RotatedRect>& rects, const std::vector<cv::Point2f>& dots)
+{
+	renderParam rendPar;
+	rendPar.m_renderRectBox = rects;
+	rendPar.m_renderDot = dots;
+	return rendPar;
+}
 
-	// 结束 XML 节点并把完整字符串写回调用方提供的缓冲区
-	void finishProcessXml(CMarkup& xml, char** xmlOut)
-	{
-		xml.OutOfElem();
-		CString Out = xml.GetDoc();
-		strcpy(*xmlOut, Out.GetBuffer());
-	}
+// 创建 XML 根结构并写入公共的模块状态字段
+void DeepLearning_AI_pose::beginProcessXml(CMarkup& xml, DeepLearning_AI_pose* deepAI, const std::string& apiName, const char* moduleStatusCh)
+{
+	xml.SetDoc("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n");
+	xml.AddElem("Param");
+	xml.IntoElem();
+	xml.AddElem(apiName.c_str());
+	xml.IntoElem();
 
-	// 统一写入 score/category 字段，兼容“是否需要裁掉末尾逗号”两种来源
-	void addScoreCategoryXml(CMarkup& xml, const std::string& score, const std::string& category, bool trimTrailingComma)
-	{
-		const std::string scoreText = trimTrailingComma ? trimTrailingCommaOrDefault(score, "0") : score;
-		const std::string categoryText = trimTrailingComma ? trimTrailingCommaOrDefault(category, "-100") : category;
+	CString statusNumStr;
+	int modStatus = deepAI->m_pModStatus ? 1 : 0;
+	statusNumStr.Format("%d", modStatus);
+	xml.AddElem("moduleStatus", statusNumStr.GetBuffer());
+	xml.SetAttrib("CH", moduleStatusCh);
+}
 
-		xml.AddElem("score", scoreText.c_str());
-		xml.SetAttrib("CH", "置信度分数");
-		xml.AddElem("category", categoryText.c_str());
-		xml.SetAttrib("CH", "类别");
-	}
+// 结束 XML 节点并把完整字符串写回调用方提供的缓冲区
+void DeepLearning_AI_pose::finishProcessXml(CMarkup& xml, char** xmlOut)
+{
+	xml.OutOfElem();
+	CString Out = xml.GetDoc();
+	strcpy(*xmlOut, Out.GetBuffer());
+}
 
-	// 由检测框批量计算短轴、长轴和角度字符串，便于多个 XML 输出入口共用
-	void buildAxisStrings(
+// 统一写入 score/category 字段，兼容“是否需要裁掉末尾逗号”两种来源
+void DeepLearning_AI_pose::addScoreCategoryXml(CMarkup& xml, const std::string& score, const std::string& category, bool trimTrailingComma)
+{
+	const std::string scoreText = trimTrailingComma ? trimTrailingCommaOrDefault(score, "0") : score;
+	const std::string categoryText = trimTrailingComma ? trimTrailingCommaOrDefault(category, "-100") : category;
+
+	xml.AddElem("score", scoreText.c_str());
+	xml.SetAttrib("CH", "置信度分数");
+	xml.AddElem("category", categoryText.c_str());
+	xml.SetAttrib("CH", "类别");
+}
+
+// 由检测框批量计算短轴、长轴和角度字符串，便于多个 XML 输出入口共用
+void DeepLearning_AI_pose::buildAxisStrings(
 		const std::vector<cv::RotatedRect>& rects,
 		bool useRectAngle,
 		std::string& shortAxisStr,
 		std::string& longAxisStr,
 		std::string& angleStr)
+{
+	shortAxisStr.clear();
+	longAxisStr.clear();
+	angleStr.clear();
+
+	for (const auto& rect : rects)
 	{
-		shortAxisStr.clear();
-		longAxisStr.clear();
-		angleStr.clear();
+		const float shortAxis = std::min(rect.size.width, rect.size.height);
+		const float longAxis = std::max(rect.size.width, rect.size.height);
+		const float angle = useRectAngle ? rect.angle : 0.0f;
 
-		for (const auto& rect : rects)
-		{
-			const float shortAxis = std::min(rect.size.width, rect.size.height);
-			const float longAxis = std::max(rect.size.width, rect.size.height);
-			const float angle = useRectAngle ? rect.angle : 0.0f;
-
-			shortAxisStr.append(to_string(shortAxis)).append(",");
-			longAxisStr.append(to_string(longAxis)).append(",");
-			angleStr.append(to_string(angle)).append(",");
-		}
-
-		if (!shortAxisStr.empty())
-		{
-			shortAxisStr.pop_back();
-			longAxisStr.pop_back();
-			angleStr.pop_back();
-		}
+		shortAxisStr.append(to_string(shortAxis)).append(",");
+		longAxisStr.append(to_string(longAxis)).append(",");
+		angleStr.append(to_string(angle)).append(",");
 	}
 
-	// 将短轴、长轴和角度三个字段一次性写入 XML
-	void addAxisXml(
+	if (!shortAxisStr.empty())
+	{
+		shortAxisStr.pop_back();
+		longAxisStr.pop_back();
+		angleStr.pop_back();
+	}
+}
+
+// 将短轴、长轴和角度三个字段一次性写入 XML
+void DeepLearning_AI_pose::addAxisXml(
 		CMarkup& xml,
 		const std::vector<cv::RotatedRect>& rects,
 		bool useRectAngle,
 		const char* shortAxisName,
 		const char* longAxisName)
+{
+	std::string shortAxisStr;
+	std::string longAxisStr;
+	std::string angleStr;
+	buildAxisStrings(rects, useRectAngle, shortAxisStr, longAxisStr, angleStr);
+
+	xml.AddElem(shortAxisName, shortAxisStr.c_str());
+	xml.SetAttrib("CH", "短轴");
+	xml.AddElem(longAxisName, longAxisStr.c_str());
+	xml.SetAttrib("CH", "长轴");
+	xml.AddElem("angle", angleStr.c_str());
+	xml.SetAttrib("CH", "角度");
+}
+
+// 将 renderRectBox / renderDot 这类渲染字段统一写入 XML
+void DeepLearning_AI_pose::addRenderXml(CMarkup& xml, renderParam& rendPar, const char* rectCh, bool includeDots)
+{
+	xml.AddElem("renderRectBox", rendPar.conRenderRect().c_str());
+	xml.SetAttrib("CH", rectCh);
+
+	if (includeDots)
 	{
-		std::string shortAxisStr;
-		std::string longAxisStr;
-		std::string angleStr;
-		buildAxisStrings(rects, useRectAngle, shortAxisStr, longAxisStr, angleStr);
-
-		xml.AddElem(shortAxisName, shortAxisStr.c_str());
-		xml.SetAttrib("CH", "短轴");
-		xml.AddElem(longAxisName, longAxisStr.c_str());
-		xml.SetAttrib("CH", "长轴");
-		xml.AddElem("angle", angleStr.c_str());
-		xml.SetAttrib("CH", "角度");
+		xml.AddElem("renderDot", rendPar.conRenderDot().c_str());
+		xml.SetAttrib("CH", "渲染点集");
 	}
+}
 
-	// 将 renderRectBox / renderDot 这类渲染字段统一写入 XML
-	void addRenderXml(CMarkup& xml, renderParam& rendPar, const char* rectCh, bool includeDots)
-	{
-		xml.AddElem("renderRectBox", rendPar.conRenderRect().c_str());
-		xml.SetAttrib("CH", rectCh);
-
-		if (includeDots)
-		{
-			xml.AddElem("renderDot", rendPar.conRenderDot().c_str());
-			xml.SetAttrib("CH", "渲染点集");
-		}
-	}
-
-	// 某些历史字段以逗号拼接保存；这里负责在非空时去掉末尾逗号，否则返回默认值
-	std::string trimTrailingCommaOrDefault(const std::string& value, const char* defaultValue)
-	{
-		if (value.empty())
-			return defaultValue;
-		return value.substr(0, value.length() - 1);
-	}
+// 某些历史字段以逗号拼接保存；这里负责在非空时去掉末尾逗号，否则返回默认值
+std::string DeepLearning_AI_pose::trimTrailingCommaOrDefault(const std::string& value, const char* defaultValue)
+{
+	if (value.empty())
+		return defaultValue;
+	return value.substr(0, value.length() - 1);
 }
 
 // 通过扩展名判断是否为 ONNX 模型文件
@@ -697,6 +655,8 @@ void DeepLearning_AI_pose::resetRuntimeState()
 	m_pModule = torch::jit::Module();
 	m_modelRuntimeFormat = ModelRuntimeFormat::TorchScript;
 	resetOnnxRuntimeState();
+	m_pPoseMetaNumKpts = 0;
+	m_pPosePreferAngle = false;
 }
 
 // 初始化 ONNXRuntime 会话，并缓存输入/输出名字，后续推理时不再重复查询元数据
@@ -777,7 +737,31 @@ int DeepLearning_AI_pose::loadOnnxModule()
 	const int fixedInputSize = getFixedSquareOnnxInputSize(*m_ortSession);
 	if (fixedInputSize > 0 && m_inputSize > 0 && fixedInputSize != m_inputSize)
 	{
-		throw std::runtime_error(buildOnnxInputSizeHint(m_inputSize, fixedInputSize));
+		throw std::runtime_error("XML parameter <inputSize> does not match the loaded ONNX model.");
+	}
+
+	m_pPoseMetaNumKpts = 0;
+	m_pPosePreferAngle = false;
+	try
+	{
+		auto metadata = m_ortSession->GetModelMetadata();
+		//从 ONNX metadata 里读取task属性值
+		auto task = metadata.LookupCustomMetadataMapAllocated("task", allocator);
+		if (task && task.get() != nullptr)
+		{
+			m_pPosePreferAngle = trimCopy(task.get()) == "obb";
+		}
+		//从 ONNX metadata 里读取kpt_shape属性值
+		auto kptShape = metadata.LookupCustomMetadataMapAllocated("kpt_shape", allocator);
+		if (kptShape && kptShape.get() != nullptr)
+		{
+			m_pPoseMetaNumKpts = parsePoseKptCountFromShapeText(trimCopy(kptShape.get()));
+		}
+	}
+	catch (const std::exception& e)
+	{
+		std::cout << "read kpt_shape metadata failed: " << e.what() << std::endl;
+		m_pPoseMetaNumKpts = 0;
 	}
 
 	m_modelRuntimeFormat = ModelRuntimeFormat::Onnx;
@@ -950,8 +934,6 @@ int DeepLearning_AI_pose::loadModule(char* xmlIn, string apiName)
 		{
 			gpuID = 0;
 		}
-		// YOLO 版本选择：0 表示 YOLOv8，1 表示 YOLOv5
-		//m_yolo_version = rXml.parseXmlInt(xmlIn, "Param", apiName, "m_yolo_version");
 		m_inputSize = rXml.parseXmlInt(xmlIn, "Param", apiName, "inputSize");
 		// 如果 xmlIn 中的路径与已保存路径一致
 		// 相同路径且当前实例已处于可用状态时，直接复用，避免重复加载模型
@@ -968,7 +950,7 @@ int DeepLearning_AI_pose::loadModule(char* xmlIn, string apiName)
 
 		// 没有显式传 inputSize 时，补Pose模型的默认输入尺寸
 		if (m_inputSize == 0) {
-			m_inputSize = 640; // 姿态Pose
+			m_inputSize = 640; // Pose
 		}
 
 		ModelRuntimeFormat runtime_format = ModelRuntimeFormat::TorchScript;
@@ -993,8 +975,18 @@ int DeepLearning_AI_pose::loadModule(char* xmlIn, string apiName)
 			{
 				m_pDevice = c10::Device(c10::kCPU);
 			}
-			m_pModule = torch::jit::load(m_pModulePath.c_str(), m_pDevice);
+			torch::jit::ExtraFilesMap extraFiles;
+			extraFiles["config.txt"] = "";
+			m_pModule = torch::jit::load(m_pModulePath.c_str(), m_pDevice, extraFiles);
 			m_modelRuntimeFormat = ModelRuntimeFormat::TorchScript;
+			m_pPoseMetaNumKpts = 0;
+			m_pPosePreferAngle = false;
+			auto configIt = extraFiles.find("config.txt");
+			if (configIt != extraFiles.end() && !configIt->second.empty())
+			{
+				m_pPosePreferAngle = parsePosePreferAngleFromConfigText(configIt->second);
+				m_pPoseMetaNumKpts = parsePoseKptCountFromConfigText(configIt->second);
+			}
 			if (m_pDeviceType && m_pDevice.type() != c10::kCUDA)
 			{
 				std::cout
@@ -1049,7 +1041,6 @@ int DeepLearning_AI_pose::loadModule(char* xmlIn, string apiName)
 	catch (const std::exception& e)
 	{
 		std::string errorMessage = e.what();
-		errorMessage.append(buildInputSizeMismatchHint(errorMessage, m_inputSize));
 		std::cerr << "loadModule std Exception: " << errorMessage << std::endl;
 		CString str;
 		str.Format("loadModule std Exception %s", errorMessage.c_str());
@@ -1077,8 +1068,35 @@ void DeepLearning_AI_pose::warmup(at::Tensor img)
 	}
 	else
 	{
-		// 推理
+		// 两次预热推理
 		torch::jit::IValue output = m_pModule.forward({ img });
+		if (m_pPoseMetaNumKpts <= 0)
+		{
+			std::vector<torch::Tensor> outputs;
+			if (output.isTensor())
+			{
+				outputs.push_back(output.toTensor());
+			}
+			else if (output.isTuple())
+			{
+				for (const auto& element : output.toTuple()->elements())
+				{
+					outputs.push_back(element.toTensor());
+				}
+			}
+
+			if (!outputs.empty())
+			{
+				torch::Tensor pred = outputs[0].squeeze().transpose(0, 1);
+				PoseLayout layout;
+				const int feature_dim = static_cast<int>(pred.size(1));
+				//若元信息没有，就从真实输出里学回来
+				if (inferPoseLayout(feature_dim, layout) && layout.num_kps > 0)
+				{
+					m_pPoseMetaNumKpts = layout.num_kps;
+				}
+			}
+		}
 		torch::jit::IValue output1 = m_pModule.forward({ img });
 	}
 	auto end = std::chrono::high_resolution_clock::now();
@@ -1087,10 +1105,20 @@ void DeepLearning_AI_pose::warmup(at::Tensor img)
 
 }
 
-// ONNX 预热与 TorchScript 保持一致：执行两次空推理，尽量把初始化成本前置
 void DeepLearning_AI_pose::warmupOnnx(const torch::Tensor& img)
 {
-	(void)forwardOnnx(img);
+	auto outputs = forwardOnnx(img);
+	if (m_pPoseMetaNumKpts <= 0 && !outputs.empty())
+	{
+		torch::Tensor pred = outputs[0].squeeze().transpose(0, 1);
+		PoseLayout layout;
+		const int feature_dim = static_cast<int>(pred.size(1));
+		//ONNX元信息可能缺失，或者模型导出格式有变化，需再做了一层“按输出维度反推”
+		if (inferPoseLayout(feature_dim, layout) && layout.num_kps > 0)
+		{
+			m_pPoseMetaNumKpts = layout.num_kps;
+		}
+	}
 	(void)forwardOnnx(img);
 }
 
@@ -1174,7 +1202,6 @@ int DeepLearning_AI_pose::processOneImgByPose(void* inImg, void*& outImg, char* 
 		//	DC_VecRotaRect,
 		//	parseCategoryIds(DC_class),
 		//	DC_Pts);
-		// 
 		//// 输出图像构造
 		//m_renderparam.conOutImg(deepAI->m_pDrcImg, outImg);
 
@@ -1194,7 +1221,7 @@ int DeepLearning_AI_pose::processOneImgByPose(void* inImg, void*& outImg, char* 
 				DC_score,
 				DC_class,
 				true,
-				false,
+				true,
 				"shortAxis",
 				"longAxis",
 				"模块状态",
@@ -1224,15 +1251,6 @@ int DeepLearning_AI_pose::processOneImgByPose(void* inImg, void*& outImg, char* 
 	return 0;
 }
 
-int DeepLearning_AI_pose::outputPoseImg(cv::Mat inImg, void*& outImg)
-{
-	int size = inImg.total() * inImg.elemSize();
-	unsigned char* dstMat = new unsigned char[size];
-	std::memcpy(dstMat, inImg.data, size * sizeof(unsigned char));
-	outImg = new cv::Mat(inImg.rows, inImg.cols, inImg.type(), dstMat);
-	return 0;
-}
-
 // ============================================================================
 // 姿态估计(pose)模型推理与后处理
 // 输出 YOLO 姿态格式：每个检测包含 bbox + num_kps 个关键点坐标
@@ -1252,7 +1270,6 @@ int DeepLearning_AI_pose::runPose(cv::Mat& m_pSrcImg, std::vector<cv::RotatedRec
 	if (conf_thres > 1.0) conf_thres = 0.8;
 	int image_size = m_inputSize;
 	torch::NoGradGuard no_grad;
-	// TODO：检查图像尺寸
 
 	/*** 预处理 ***/
 	InferenceInput input = prepareYoloInput(m_pSrcImg, image_size);
@@ -1286,39 +1303,97 @@ int DeepLearning_AI_pose::runPose(cv::Mat& m_pSrcImg, std::vector<cv::RotatedRec
 	if (num_det == 0) return 0;
 
 	appendPoseDetections(det, layout, pad_w, pad_h, scale, rectSrc, DC_VecRotaRect, DC_score, DC_class, DC_Pts);
+	m_pPoseNumKpts = layout.num_kps;
 
 	logStageCost("post-process", post_start);
 
 	return num_det;
 }
 
-// 根据 feature_dim 反推姿态输出布局
-// 这里兼容 [x, y, score] 和 [x, y] 两种关键点表示
+// 根据模型输出的每一条检测结果的维度 feature_dim，自动推断 pose 模型的输出布局 PoseLayout
+// 核心逻辑是根据总维度拆解出这几个部分：
+// bbox(4) + class / objectness相关字段(nc) + 可选 angle(1) + keypoints(num_kps * kpt_dim)
 bool DeepLearning_AI_pose::inferPoseLayout(int feature_dim, PoseLayout& layout)
 {
-	layout = { 0, 0, 0 };
+	layout = { 0, 0, 0, false, -1, 0 };
+	const bool prefer_angle = m_pPosePreferAngle;
+	const int preferredKptCount = m_pPoseMetaNumKpts;
 
-	for (int candidate_nc : { 2, 1 }) {
-		const int remain = feature_dim - 4 - candidate_nc;
-		if (remain > 0 && remain % 3 == 0) {
-			layout = { candidate_nc, remain / 3, 3 };
-			return true;
+	//优先使用已知关键点数量推断
+	auto tryPreferredLayout = [&](bool withAngle) -> bool {
+		if (preferredKptCount <= 0)
+			return false;
+		for (int candidate_nc : { 2, 1 }) {
+			//根据是否带 angle，计算关键点起始位置
+			const int kpt_start = withAngle ? (4 + candidate_nc + 1) : (4 + candidate_nc);
+			const int remain = feature_dim - kpt_start;
+			if (remain == preferredKptCount * 3) {
+				layout = { candidate_nc, preferredKptCount, 3, withAngle, withAngle ? (4 + candidate_nc) : -1, kpt_start };
+				return true;
+			}
+			if (remain == preferredKptCount * 2) {
+				layout = { candidate_nc, preferredKptCount, 2, withAngle, withAngle ? (4 + candidate_nc) : -1, kpt_start };
+				return true;
+			}
 		}
-	}
-
-	for (int candidate_nc : { 2, 1 }) {
-		const int remain = feature_dim - 4 - candidate_nc;
-		if (remain > 0 && remain % 2 == 0) {
-			layout = { candidate_nc, remain / 2, 2 };
-			return true;
+		return false;
+	};
+	//优先推断带角度的布局
+	auto tryAngleLayout = [&]() -> bool {
+		for (int candidate_nc : { 2, 1 }) {
+			const int kpt_start = 4 + candidate_nc + 1;
+			const int remain = feature_dim - kpt_start;
+			if (remain > 0 && remain % 3 == 0) {
+				layout = { candidate_nc, remain / 3, 3, true, 4 + candidate_nc, kpt_start };
+				return true;
+			}
 		}
-	}
 
-	return false;
+		for (int candidate_nc : { 2, 1 }) {
+			const int kpt_start = 4 + candidate_nc + 1;
+			const int remain = feature_dim - kpt_start;
+			if (remain > 0 && remain % 2 == 0) {
+				layout = { candidate_nc, remain / 2, 2, true, 4 + candidate_nc, kpt_start };
+				return true;
+			}
+		}
+
+		return false;
+	};
+	//推断没有 angle 的普通 pose 输出布局
+	auto tryPoseLayout = [&]() -> bool {
+		for (int candidate_nc : { 2, 1 }) {
+			const int kpt_start = 4 + candidate_nc;
+			const int remain = feature_dim - kpt_start;
+			if (remain > 0 && remain % 3 == 0) {
+				layout = { candidate_nc, remain / 3, 3, false, -1, kpt_start };
+				return true;
+			}
+		}
+
+		for (int candidate_nc : { 2, 1 }) {
+			const int kpt_start = 4 + candidate_nc;
+			const int remain = feature_dim - kpt_start;
+			if (remain > 0 && remain % 2 == 0) {
+				layout = { candidate_nc, remain / 2, 2, false, -1, kpt_start };
+				return true;
+			}
+		}
+
+		return false;
+	};
+	// 如果 task == "obb"，就把 m_pPosePreferAngle = true，在布局推断时优先考虑“带 angle 字段”的输出布局
+	if (prefer_angle) {
+		if (tryPreferredLayout(true) || tryPreferredLayout(false))
+			return true;
+		return tryAngleLayout() || tryPoseLayout();
+	}
+	if (tryPreferredLayout(false) || tryPreferredLayout(true))
+		return true;
+	return tryPoseLayout() || tryAngleLayout();
 }
 
-// 姿态后处理：
-// 先按类别置信度筛选，再做 NMS，最后把关键点跟随保留下来
+// 姿态后处理：先按类别置信度筛选，再做 NMS，最后把关键点跟随保留下来
 torch::Tensor DeepLearning_AI_pose::buildPoseDetections(torch::Tensor pred, float conf_thres, float iou_thres, const PoseLayout& layout)
 {
 	std::vector<torch::Tensor> indices = torch::where(pred.slice(1, 4, 4 + layout.nc) > conf_thres);
@@ -1333,12 +1408,15 @@ torch::Tensor DeepLearning_AI_pose::buildPoseDetections(torch::Tensor pred, floa
 	auto boxes = pred.slice(1, 0, 4);
 	auto scores = pred.gather(1, (index_j + 4).unsqueeze(1));
 	auto class_idxs = index_j.to(torch::kFloat32).unsqueeze(1);
-	auto pts = pred.slice(1, 4 + layout.nc);
+	auto angles = layout.has_angle
+		? pred.slice(1, layout.angle_index, layout.angle_index + 1)
+		: torch::zeros({ pred.size(0), 1 }, pred.options());
+	auto pts = pred.slice(1, layout.kpt_start);
 
-	auto det = torch::cat({ boxes, scores, class_idxs, pts }, 1).cpu();
+	auto det = torch::cat({ boxes, angles, scores, class_idxs, pts }, 1).cpu();
 	constexpr float max_wh = 8192.0f;
-	auto boxes_for_nms = det.slice(1, 0, 4) + det.select(1, 5).unsqueeze(1) * max_wh;
-	auto keep = nms_kernel(boxes_for_nms, det.select(1, 4), iou_thres);
+	auto boxes_for_nms = det.slice(1, 0, 4) + det.select(1, 6).unsqueeze(1) * max_wh;
+	auto keep = nms_kernel(boxes_for_nms, det.select(1, 5), iou_thres);
 	return torch::index_select(det, 0, keep);
 }
 
@@ -1385,7 +1463,7 @@ DeepLearning_AI_pose::InferenceInput DeepLearning_AI_pose::prepareYoloInput(cv::
 	return { tensor_img, pad_info[0], pad_info[1], pad_info[2] };
 }
 
-// 输出单阶段耗时，阶段名由调用方传入
+// 统一处理 YOLO 路径的 Letterbox 与 BCHW 张量转换
 void DeepLearning_AI_pose::logStageCost(const char* stage_name, std::chrono::high_resolution_clock::time_point start)
 {
 	auto end = std::chrono::high_resolution_clock::now();
@@ -1393,7 +1471,7 @@ void DeepLearning_AI_pose::logStageCost(const char* stage_name, std::chrono::hig
 	std::cout << stage_name << " takes : " << duration.count() * 1e-3 << " ms" << std::endl;
 }
 
-// 原地将中心点框表达转成左上/右下框表达，避免产生额外张量副本
+// 输出单阶段耗时，阶段名由调用方传入
 void DeepLearning_AI_pose::xywhToXyxyInPlace(torch::Tensor& pred)
 {
 	pred.select(1, 0) = pred.select(1, 0) - pred.select(1, 2).div(2);
@@ -1440,54 +1518,37 @@ std::vector<float> DeepLearning_AI_pose::LetterboxImage(const cv::Mat& src, cv::
 	return pad_info;
 }
 
-// 不同导出器导出的 YOLO 输出维度顺序并不完全一致，这里归一化成 [N, C] 便于统一后处理
-torch::Tensor DeepLearning_AI_pose::normalizeYoloOutput(torch::Tensor pred)
-{
-	if (pred.dim() == 3)
-	{
-		if (pred.size(0) == 1)
-		{
-			pred = pred.squeeze(0);
-		}
-		else if (pred.size(2) < pred.size(1))
-		{
-			pred = pred.transpose(1, 2).squeeze(0);
-		}
-	}
-
-	if (pred.dim() == 2 && pred.size(0) < pred.size(1))
-	{
-		pred = pred.transpose(0, 1);
-	}
-
-	return pred;
-}
-
-// 将统一后的检测张量回填成旋转框、类别和关键点列表
 void DeepLearning_AI_pose::appendPoseDetections(const torch::Tensor& det, const PoseLayout& layout, float pad_w, float pad_h, float scale,
 	const cv::Rect& rectSrc, std::vector<cv::RotatedRect>& boxes, std::string& scores,
 	std::string& classes, std::vector<cv::Point2f>& points)
 {
-	const int kpt_start = 6;
+	const int kpt_start = 7;
 	for (int index = 0; index < det.size(0); ++index) {
 		boxes.push_back(tensorBoxToRotatedRect(det[index], pad_w, pad_h, scale, rectSrc));
-		scores.append(to_string(det[index][4].item().toFloat())).append(",");
-		classes.append(to_string(det[index][5].item().toInt())).append(",");
+		scores.append(to_string(det[index][5].item().toFloat())).append(",");
+		classes.append(to_string(det[index][6].item().toInt())).append(",");
 
 		for (int kpt_index = 0; kpt_index < layout.num_kps; ++kpt_index) {
 			const int base_index = kpt_start + kpt_index * layout.kpt_dim;
 			if (base_index + 1 >= det.size(1)) {
-				break;
+				points.push_back(cv::Point2f(-1.0f, -1.0f));
+				m_pPoseKptScore.append("0,");
+				continue;
 			}
-
-			float kpx = (det[index][base_index].item().toFloat() - pad_w) / scale + rectSrc.x;
-			float kpy = (det[index][base_index + 1].item().toFloat() - pad_h) / scale + rectSrc.y;
-			points.push_back(cv::Point2f(kpx, kpy));
 
 			float kpt_score = 1.0f;
 			if (layout.kpt_dim >= 3 && base_index + 2 < det.size(1)) {
 				kpt_score = det[index][base_index + 2].item().toFloat();
 			}
+			if (layout.kpt_dim >= 3 && kpt_score <= 0.01f) {
+				points.push_back(cv::Point2f(-1.0f, -1.0f));
+				m_pPoseKptScore.append("0,");
+				continue;
+			}
+
+			float kpx = (det[index][base_index].item().toFloat() - pad_w) / scale + rectSrc.x;
+			float kpy = (det[index][base_index + 1].item().toFloat() - pad_h) / scale + rectSrc.y;
+			points.push_back(cv::Point2f(kpx, kpy));
 			m_pPoseKptScore.append(to_string(kpt_score)).append(",");
 		}
 	}
@@ -1506,7 +1567,7 @@ cv::RotatedRect DeepLearning_AI_pose::tensorBoxToRotatedRect(const torch::Tensor
 	rect.center.y = (y1 + y2) / 2 + rectSrc.y;
 	rect.size.width = x2 - x1;
 	rect.size.height = y2 - y1;
-	rect.angle = 0;
+	rect.angle = det_row[4].item().toFloat() * static_cast<float>(180.0 / CV_PI);
 	return rect;
 }
 
@@ -1646,7 +1707,3 @@ std::vector<torch::Tensor> DeepLearning_AI_pose::forwardWithTiming(const torch::
 	}
 	return outputs;
 }
-
-
-
-
